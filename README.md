@@ -81,9 +81,6 @@ Where I = iterations, S₁ = phase 1 steps, P₁ = phase 1 pulses.
 
 ⚠️ **Emergency stop:** Ctrl+Alt+Shift+Q
 
-## License
-
-MIT License - see [LICENSE](LICENSE)
 
 ## Related Projects
 
