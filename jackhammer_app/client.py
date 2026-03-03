@@ -74,6 +74,34 @@ class EphysLinkClient:
         result = json.loads(response)
         return JackhammerResult.from_dict(result)
 
+    def jackhammer_closed_loop(self, manipulator_id: str, target_um: float) -> dict:
+        """Execute closed-loop jackhammer command.
+        
+        Args:
+            manipulator_id: Manipulator ID.
+            target_um: Target advancement in micrometers.
+            
+        Returns:
+            Dictionary with position, iterations_used, stop_reason, advancement_um.
+            
+        Raises:
+            RuntimeError: If not connected.
+        """
+        if not self._connected or not self._sio:
+            raise RuntimeError("Not connected to server.")
+
+        params = {
+            "manipulator_id": manipulator_id,
+            "closed_loop": True,
+            "target_um": target_um,
+            "phase1_steps": 2,
+            "phase1_pulses": 70,
+            "phase2_steps": 2,
+            "phase2_pulses": -70,
+        }
+        response = self._sio.call("jackhammer", json.dumps(params), timeout=120)
+        return json.loads(response)
+
     def stop(self, manipulator_id: str) -> None:
         """Send emergency stop command.
         

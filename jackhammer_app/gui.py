@@ -512,6 +512,205 @@ Note: Steps are the primary driver of advancement.
             self._result_label.configure(text="-- µm")
 
 
+class ClosedLoopTab:
+    """Closed Loop tab for automatic advancement to target."""
+
+    def __init__(
+        self,
+        parent: ttk.Frame,
+        client: EphysLinkClient,
+        on_log: Callable[[str], None],
+        is_connected: Callable[[], bool],
+    ) -> None:
+        """Initialize closed loop tab."""
+        self._client = client
+        self._on_log = on_log
+        self._is_connected = is_connected
+        self._running = False
+
+        # Description
+        desc_frame = ttk.LabelFrame(parent, text="Closed Loop Mode", padding="10")
+        desc_frame.pack(fill="x", pady=(0, 10))
+
+        desc_text = """Automatically advances the probe until target depth is reached.
+Uses gentle parameters (steps=2, pulses=70/-70) with single iterations.
+
+Stop conditions:
+  • Target advancement reached (90% threshold)
+  • Significant backward movement detected
+  • Maximum 50 iterations (safety limit)"""
+
+        ttk.Label(desc_frame, text=desc_text, justify="left").pack(anchor="w")
+
+        # Manipulator ID
+        manip_frame = ttk.LabelFrame(parent, text="Manipulator", padding="5")
+        manip_frame.pack(fill="x", pady=(0, 10))
+
+        inner = ttk.Frame(manip_frame)
+        inner.pack(fill="x")
+
+        ttk.Label(inner, text="Manipulator ID:").pack(side="left", padx=(0, 5))
+        self._manip_entry = ttk.Entry(inner, width=10)
+        self._manip_entry.pack(side="left")
+
+        # Target input
+        target_frame = ttk.LabelFrame(parent, text="Target Advancement", padding="5")
+        target_frame.pack(fill="x", pady=(0, 10))
+
+        target_inner = ttk.Frame(target_frame)
+        target_inner.pack(fill="x")
+
+        ttk.Label(target_inner, text="Advance by:").pack(side="left", padx=(0, 5))
+        self._target_entry = ttk.Entry(target_inner, width=10)
+        self._target_entry.insert(0, "50")
+        self._target_entry.pack(side="left")
+        ttk.Label(target_inner, text="µm").pack(side="left", padx=(5, 0))
+
+        # Presets
+        preset_row = ttk.Frame(target_frame)
+        preset_row.pack(fill="x", pady=(10, 0))
+        
+        ttk.Label(preset_row, text="Quick targets:").pack(side="left", padx=(0, 10))
+        for um in [25, 50, 100, 200]:
+            btn = ttk.Button(preset_row, text=f"{um} µm", width=8,
+                           command=lambda v=um: self._set_target(v))
+            btn.pack(side="left", padx=(0, 5))
+
+        # Run button
+        control_frame = ttk.Frame(parent)
+        control_frame.pack(fill="x", pady=(0, 10))
+
+        self._run_btn = ttk.Button(control_frame, text="Run Closed Loop", command=self._run, state="disabled")
+        self._run_btn.pack(side="left", expand=True, fill="x")
+
+        # Results
+        results_frame = ttk.LabelFrame(parent, text="Results", padding="5")
+        results_frame.pack(fill="x", pady=(0, 10))
+
+        # Position
+        pos_row = ttk.Frame(results_frame)
+        pos_row.pack(fill="x", pady=(0, 5))
+        ttk.Label(pos_row, text="Position:").pack(side="left", padx=(0, 5))
+        self._position_label = ttk.Label(pos_row, text="x: --  y: --  z: --  w: --", font=("Consolas", 10))
+        self._position_label.pack(side="left")
+
+        # Iterations
+        iter_row = ttk.Frame(results_frame)
+        iter_row.pack(fill="x", pady=(0, 5))
+        ttk.Label(iter_row, text="Iterations used:").pack(side="left", padx=(0, 5))
+        self._iterations_label = ttk.Label(iter_row, text="--", font=("Consolas", 10))
+        self._iterations_label.pack(side="left")
+
+        # Stop reason
+        reason_row = ttk.Frame(results_frame)
+        reason_row.pack(fill="x", pady=(0, 5))
+        ttk.Label(reason_row, text="Stop reason:").pack(side="left", padx=(0, 5))
+        self._reason_label = ttk.Label(reason_row, text="--", font=("Consolas", 10))
+        self._reason_label.pack(side="left")
+
+        # Actual advancement
+        adv_row = ttk.Frame(results_frame)
+        adv_row.pack(fill="x")
+        ttk.Label(adv_row, text="Actual advancement:").pack(side="left", padx=(0, 5))
+        self._advancement_label = ttk.Label(adv_row, text="-- µm", font=("Consolas", 10, "bold"), foreground="green")
+        self._advancement_label.pack(side="left")
+
+    def _set_target(self, um: int) -> None:
+        """Set target value."""
+        self._target_entry.delete(0, "end")
+        self._target_entry.insert(0, str(um))
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable or disable run button."""
+        self._run_btn.configure(state="normal" if enabled and not self._running else "disabled")
+
+    def _run(self) -> None:
+        """Execute closed loop jackhammer."""
+        manip_id = self._manip_entry.get().strip()
+        if not manip_id:
+            messagebox.showerror("Error", "Manipulator ID is required.")
+            return
+
+        try:
+            target_um = float(self._target_entry.get().strip())
+        except ValueError:
+            messagebox.showerror("Error", "Target must be a number.")
+            return
+
+        if target_um <= 0:
+            messagebox.showerror("Error", "Target must be positive.")
+            return
+
+        if not self._is_connected():
+            messagebox.showerror("Error", "Not connected to server.")
+            return
+
+        self._running = True
+        self._run_btn.configure(state="disabled")
+        self._on_log(f"Starting closed loop: target={target_um} µm on manipulator {manip_id}...")
+
+        # Clear previous results
+        self._position_label.configure(text="Running...")
+        self._iterations_label.configure(text="...")
+        self._reason_label.configure(text="...")
+        self._advancement_label.configure(text="... µm")
+
+        thread = threading.Thread(target=self._execute, args=(manip_id, target_um))
+        thread.start()
+
+    def _execute(self, manip_id: str, target_um: float) -> None:
+        """Execute in background thread."""
+        try:
+            result = self._client.jackhammer_closed_loop(manip_id, target_um)
+            # Schedule UI update on main thread
+            self._run_btn.master.after(0, self._handle_result, result)
+        except Exception as e:
+            self._run_btn.master.after(0, self._handle_error, str(e))
+
+    def _handle_result(self, result: dict) -> None:
+        """Handle result in main thread."""
+        self._running = False
+        self._run_btn.configure(state="normal")
+
+        error = result.get("Error", "")
+        if error:
+            self._on_log(f"Error: {error}")
+            messagebox.showerror("Closed Loop Error", error)
+            return
+
+        # Update position
+        pos = result.get("Position", {})
+        pos_text = f"x: {pos.get('x', 0):.4f}   y: {pos.get('y', 0):.4f}   z: {pos.get('z', 0):.4f}   w: {pos.get('w', 0):.4f}"
+        self._position_label.configure(text=pos_text)
+
+        # Update iterations
+        iterations = result.get("IterationsUsed", "--")
+        self._iterations_label.configure(text=str(iterations))
+
+        # Update stop reason
+        reason = result.get("StopReason", "--")
+        reason_display = {
+            "target_reached": "✅ Target reached",
+            "backward_movement": "⚠️ Backward movement",
+            "max_iterations": "🔴 Max iterations (50)",
+        }.get(reason, reason)
+        self._reason_label.configure(text=reason_display)
+
+        # Update advancement
+        advancement = result.get("AdvancementUm", 0)
+        self._advancement_label.configure(text=f"{advancement:.1f} µm")
+
+        self._on_log(f"Closed loop complete: {advancement:.1f} µm in {iterations} iterations ({reason})")
+
+    def _handle_error(self, error: str) -> None:
+        """Handle error in main thread."""
+        self._running = False
+        self._run_btn.configure(state="normal")
+        self._on_log(f"Error: {error}")
+        self._position_label.configure(text="Error")
+        messagebox.showerror("Error", error)
+
+
 class HelpWindow:
     """Help window with usage information."""
 
@@ -544,22 +743,24 @@ cycle consists of two phases:
   • Phase 1: Forward movement (positive pulses)
   • Phase 2: Backward movement (negative pulses)
 
-IMPORTANT: Jackhammer operates in "open loop" - it doesn't track
-position during movement. Always check position after running.
+MODES:
 
-ADVANCEMENT BEHAVIOR:
+Open Loop (Control tab):
+  Run a fixed number of iterations with custom parameters.
+  You control everything manually.
 
-Advancement is highly sensitive to Steps (S₁) and scales non-linearly
-with Iterations (I), while Pulses (P₁) act more like a dampener.
+Closed Loop (Closed Loop tab):
+  Specify target advancement in µm. The system automatically
+  runs iterations until target is reached or safety limit hit.
 
-Empirical formula: Δw ≈ 0.3 × I^0.9 × S₁^1.4 × P₁^0.5"""
+IMPORTANT: Jackhammer is unpredictable. Always check position after."""
 
         ttk.Label(overview_frame, text=overview_text, justify="left").pack(anchor="w")
 
         # Parameters tab
         params_frame = ttk.Frame(notebook, padding="10")
         notebook.add(params_frame, text="Parameters")
-        params_text = """PARAMETER GUIDE:
+        params_text = """PARAMETER GUIDE (Open Loop):
 
 Iterations (I)
   Number of complete jackhammer cycles. Scales as I^0.9.
@@ -573,18 +774,11 @@ Phase 1 Pulses (P₁) - DAMPENER
   Pulse intensity (1-100). Scales as P₁^0.5 (sublinear).
   Provides raw mechanical force, but effect plateaus.
 
-Phase 2 Steps/Pulses
-  Control the retraction phase. Usually less than Phase 1.
+CLOSED LOOP PARAMETERS:
 
-PRESETS:
-
-Gentle (Default) - ~4.7 µm per call
-  iterations=2, steps=1/1, pulses=70/-70
-  Safe for dura approach. May need multiple calls.
-
-Standard - ~23.8 µm per call
-  iterations=10, steps=1/1, pulses=100/-100
-  SDK defaults. Use with caution near dura."""
+Fixed parameters used: steps=2, pulses=70/-70
+These are gentle settings that allow fine control.
+System runs 1 iteration at a time, checking position after each."""
 
         ttk.Label(params_frame, text=params_text, justify="left").pack(anchor="w")
 
@@ -593,20 +787,19 @@ Standard - ~23.8 µm per call
         notebook.add(safety_frame, text="Safety")
         safety_text = """SAFETY WARNINGS:
 
-⚠️  THE GOLDEN RULE FOR DURA APPROACH:
-    Do NOT bundle iterations. Use 1 iteration per call,
-    check position, repeat. Once you see a sudden spike
-    in Δw, you have broken through - STOP IMMEDIATELY.
-
 ⚠️  EMERGENCY STOP: Ctrl+Alt+Shift+Q stops all movement.
 
-⚠️  START GENTLE: Always begin with Gentle preset (~4.7 µm).
-    Only increase if needed.
+⚠️  START GENTLE: Use Closed Loop mode or Gentle preset first.
 
 ⚠️  CHECK POSITION: After each run, verify probe position.
-    Movement is unpredictable and history-dependent.
 
-⚠️  MULTIPLE SMALL RUNS: Safer than one aggressive run.
+⚠️  CLOSED LOOP LIMITS:
+    • Stops at 90% of target (to prevent overshoot)
+    • Stops after 50 iterations (safety limit)
+    • Stops if significant backward movement detected
+
+⚠️  BACKWARD MOVEMENT: If probe moves backward significantly
+    (>250 µm), system stops to prevent damage.
 
 PARAMETER SAFETY TIERS:
 
@@ -621,35 +814,31 @@ PARAMETER SAFETY TIERS:
         notebook.add(workflow_frame, text="Workflow")
         workflow_text = """RECOMMENDED WORKFLOW:
 
-1. START EPHYS LINK
-   Terminal: ephys-link -b -t ump
-   Note manipulator IDs shown at startup.
+USING CLOSED LOOP (Recommended):
 
-2. CONNECT
-   Enter host/port, click Connect.
-   Status should turn green.
+1. Start Ephys Link: ephys-link -b -t ump
+2. Connect in Jackhammer Tool
+3. Go to "Closed Loop" tab
+4. Enter manipulator ID
+5. Set target advancement (e.g., 50 µm)
+6. Click "Run Closed Loop"
+7. Check results - repeat if needed
 
-3. ENTER MANIPULATOR ID
-   Type the ID of your target manipulator.
+USING OPEN LOOP (Manual):
 
-4. CHECK INITIAL POSITION
-   Click "Get Position". Note the W (depth) value.
-
-5. RUN JACKHAMMER (ITERATIVE APPROACH)
-   a. Use Gentle preset (1-2 iterations)
-   b. Click "Run Jackhammer"
-   c. Check new position
-   d. Calculate Δw (change in depth)
-   e. If Δw is small → repeat from (a)
-   f. If Δw suddenly spikes → STOP (dura breakthrough!)
-
-6. AFTER BREAKTHROUGH
-   Probe is through dura. Continue insertion normally.
+1. Start Ephys Link: ephys-link -b -t ump
+2. Connect in Jackhammer Tool
+3. Stay on "Control" tab
+4. Enter manipulator ID
+5. Use Gentle preset
+6. Click "Run Jackhammer"
+7. Check advancement
+8. Repeat until through dura
 
 TROUBLESHOOTING:
-• No movement? → Check connection, try higher pulses
-• Too much movement? → Reduce steps first, then iterations
-• Inconsistent? → Tissue resistance varies, this is normal"""
+• No movement? → Try higher pulses or steps
+• Too much movement? → Use Closed Loop mode
+• Timeout? → Closed loop can take up to 2 minutes"""
 
         ttk.Label(workflow_frame, text=workflow_text, justify="left").pack(anchor="w")
 
@@ -685,9 +874,9 @@ class JackhammerGUI:
         self._notebook = ttk.Notebook(main_frame)
         self._notebook.pack(fill="both", expand=True)
 
-        # Control tab
+        # Control tab (Open Loop)
         control_frame = ttk.Frame(self._notebook, padding="10")
-        self._notebook.add(control_frame, text="Control")
+        self._notebook.add(control_frame, text="Open Loop")
 
         self._connection = ConnectionFrame(control_frame, self._connect, self._disconnect)
         self._manipulator = ManipulatorFrame(control_frame)
@@ -698,6 +887,16 @@ class JackhammerGUI:
         self._parameters = ParametersFrame(control_frame, self._status.log)
         self._controls = ControlFrame(control_frame, self._run_jackhammer, self._emergency_stop, self._show_help)
         self._position = PositionFrame(control_frame, self._get_position, self._reset_total)
+
+        # Closed Loop tab
+        closed_loop_frame = ttk.Frame(self._notebook, padding="10")
+        self._notebook.add(closed_loop_frame, text="Closed Loop")
+        self._closed_loop = ClosedLoopTab(
+            closed_loop_frame,
+            self._client,
+            self._status.log,
+            lambda: self._client.is_connected,
+        )
 
         # Calculator tab
         calc_frame = ttk.Frame(self._notebook, padding="10")
@@ -729,6 +928,7 @@ class JackhammerGUI:
             self._connection.set_connected(True)
             self._controls.set_enabled(True)
             self._position.set_enabled(True)
+            self._closed_loop.set_enabled(True)
             self._status.log("Connected successfully.")
         except ConnectionError as e:
             self._status.log(f"Connection failed: {e}")
@@ -740,6 +940,7 @@ class JackhammerGUI:
         self._connection.set_connected(False)
         self._controls.set_enabled(False)
         self._position.set_enabled(False)
+        self._closed_loop.set_enabled(False)
         self._status.log("Disconnected.")
 
     def _run_jackhammer(self) -> None:
