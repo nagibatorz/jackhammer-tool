@@ -70,16 +70,37 @@ class EphysLinkClient:
         if not self._connected or not self._sio:
             raise RuntimeError("Not connected to server.")
 
-        response = self._sio.call("jackhammer", json.dumps(params.to_dict()))
+        response = self._sio.call("jackhammer", json.dumps(params.to_dict()), timeout=60)
         result = json.loads(response)
         return JackhammerResult.from_dict(result)
+    
 
-    def jackhammer_closed_loop(self, manipulator_id: str, target_um: float) -> dict:
+    # If emergency is pressed. This will stop the current jackhammer operation immediately.
+    def abort_jackhammer(self) -> None:
+        """Abort closed loop jackhammer."""
+        if self._connected and self._sio:
+            self._sio.call("abort_jackhammer", "{}")
+
+    def jackhammer_closed_loop(
+        self,
+        manipulator_id: str,
+        target_um: float,
+        max_iterations: int = 50,
+        phase1_steps: int = 2,
+        phase1_pulses: int = 70,
+        phase2_steps: int = 2,
+        phase2_pulses: int = -70,
+    ) -> dict:
         """Execute closed-loop jackhammer command.
         
         Args:
             manipulator_id: Manipulator ID.
             target_um: Target advancement in micrometers.
+            max_iterations: Maximum iterations (safety limit).
+            phase1_steps: Steps in phase 1.
+            phase1_pulses: Pulses in phase 1.
+            phase2_steps: Steps in phase 2.
+            phase2_pulses: Pulses in phase 2.
             
         Returns:
             Dictionary with position, iterations_used, stop_reason, advancement_um.
@@ -94,12 +115,13 @@ class EphysLinkClient:
             "manipulator_id": manipulator_id,
             "closed_loop": True,
             "target_um": target_um,
-            "phase1_steps": 2,
-            "phase1_pulses": 70,
-            "phase2_steps": 2,
-            "phase2_pulses": -70,
+            "max_iterations": max_iterations,
+            "phase1_steps": phase1_steps,
+            "phase1_pulses": phase1_pulses,
+            "phase2_steps": phase2_steps,
+            "phase2_pulses": phase2_pulses,
         }
-        response = self._sio.call("jackhammer", json.dumps(params), timeout=120)
+        response = self._sio.call("jackhammer", json.dumps(params), timeout=180)
         return json.loads(response)
 
     def stop(self, manipulator_id: str) -> None:

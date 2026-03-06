@@ -521,24 +521,28 @@ class ClosedLoopTab:
         client: EphysLinkClient,
         on_log: Callable[[str], None],
         is_connected: Callable[[], bool],
+        on_emergency_stop: Callable[[], None],
+        on_help: Callable[[], None],
     ) -> None:
         """Initialize closed loop tab."""
         self._client = client
         self._on_log = on_log
         self._is_connected = is_connected
+        self._on_emergency_stop = on_emergency_stop
+        self._on_help = on_help
         self._running = False
+        self._totals: dict[str, float] = {}  # Track total advancement per manipulator
 
         # Description
         desc_frame = ttk.LabelFrame(parent, text="Closed Loop Mode", padding="10")
         desc_frame.pack(fill="x", pady=(0, 10))
 
         desc_text = """Automatically advances the probe until target depth is reached.
-Uses gentle parameters (steps=2, pulses=70/-70) with single iterations.
 
 Stop conditions:
   • Target advancement reached (90% threshold)
   • Significant backward movement detected
-  • Maximum 50 iterations (safety limit)"""
+  • Maximum iterations reached (safety limit)"""
 
         ttk.Label(desc_frame, text=desc_text, justify="left").pack(anchor="w")
 
@@ -576,69 +580,202 @@ Stop conditions:
                            command=lambda v=um: self._set_target(v))
             btn.pack(side="left", padx=(0, 5))
 
-        # Run button
+        # Parameters frame
+        params_frame = ttk.LabelFrame(parent, text="Parameters", padding="5")
+        params_frame.pack(fill="x", pady=(0, 10))
+
+        # Max iterations
+        iter_row = ttk.Frame(params_frame)
+        iter_row.pack(fill="x", pady=(0, 5))
+        
+        ttk.Label(iter_row, text="Max Iterations:").pack(side="left", padx=(0, 5))
+        self._max_iter_entry = ttk.Entry(iter_row, width=8)
+        self._max_iter_entry.insert(0, "50")
+        self._max_iter_entry.pack(side="left")
+        ttk.Label(iter_row, text="(safety limit)").pack(side="left", padx=(5, 0))
+
+        # Phase 1
+        p1_row = ttk.Frame(params_frame)
+        p1_row.pack(fill="x", pady=(0, 5))
+        
+        ttk.Label(p1_row, text="Phase 1 Steps:").pack(side="left", padx=(0, 5))
+        self._p1_steps_entry = ttk.Entry(p1_row, width=6)
+        self._p1_steps_entry.insert(0, "2")
+        self._p1_steps_entry.pack(side="left")
+        
+        ttk.Label(p1_row, text="Pulses:").pack(side="left", padx=(10, 5))
+        self._p1_pulses_entry = ttk.Entry(p1_row, width=6)
+        self._p1_pulses_entry.insert(0, "70")
+        self._p1_pulses_entry.pack(side="left")
+
+        # Phase 2
+        p2_row = ttk.Frame(params_frame)
+        p2_row.pack(fill="x", pady=(0, 5))
+        
+        ttk.Label(p2_row, text="Phase 2 Steps:").pack(side="left", padx=(0, 5))
+        self._p2_steps_entry = ttk.Entry(p2_row, width=6)
+        self._p2_steps_entry.insert(0, "2")
+        self._p2_steps_entry.pack(side="left")
+        
+        ttk.Label(p2_row, text="Pulses:").pack(side="left", padx=(10, 5))
+        self._p2_pulses_entry = ttk.Entry(p2_row, width=6)
+        self._p2_pulses_entry.insert(0, "-70")
+        self._p2_pulses_entry.pack(side="left")
+
+        # Reset button
+        ttk.Button(params_frame, text="Reset Defaults", command=self._reset_params).pack(pady=(5, 0))
+
+        # Control buttons
         control_frame = ttk.Frame(parent)
         control_frame.pack(fill="x", pady=(0, 10))
 
         self._run_btn = ttk.Button(control_frame, text="Run Closed Loop", command=self._run, state="disabled")
-        self._run_btn.pack(side="left", expand=True, fill="x")
+        self._run_btn.pack(side="left", expand=True, fill="x", padx=(0, 5))
 
-        # Results
-        results_frame = ttk.LabelFrame(parent, text="Results", padding="5")
+        style = ttk.Style()
+        style.configure("Emergency.TButton", foreground="red")
+
+        self._stop_btn = ttk.Button(
+            control_frame,
+            text="EMERGENCY STOP (Ctrl+Alt+Shift+Q)",
+            command=self._emergency_stop_combined,
+            style="Emergency.TButton",
+        )
+        self._stop_btn.pack(side="left", expand=True, fill="x", padx=(5, 5))
+
+        self._help_btn = ttk.Button(control_frame, text="Help", command=self._on_help)
+        self._help_btn.pack(side="left", padx=(5, 0))
+
+        # Position & Results
+        results_frame = ttk.LabelFrame(parent, text="Position & Results", padding="5")
         results_frame.pack(fill="x", pady=(0, 10))
 
-        # Position
+        # Position row
         pos_row = ttk.Frame(results_frame)
         pos_row.pack(fill="x", pady=(0, 5))
-        ttk.Label(pos_row, text="Position:").pack(side="left", padx=(0, 5))
+        
+        self._get_pos_btn = ttk.Button(pos_row, text="Get Position", command=self._get_position, state="disabled")
+        self._get_pos_btn.pack(side="left", padx=(0, 10))
+        
         self._position_label = ttk.Label(pos_row, text="x: --  y: --  z: --  w: --", font=("Consolas", 10))
         self._position_label.pack(side="left")
 
-        # Iterations
-        iter_row = ttk.Frame(results_frame)
-        iter_row.pack(fill="x", pady=(0, 5))
-        ttk.Label(iter_row, text="Iterations used:").pack(side="left", padx=(0, 5))
-        self._iterations_label = ttk.Label(iter_row, text="--", font=("Consolas", 10))
-        self._iterations_label.pack(side="left")
-
-        # Stop reason
-        reason_row = ttk.Frame(results_frame)
-        reason_row.pack(fill="x", pady=(0, 5))
-        ttk.Label(reason_row, text="Stop reason:").pack(side="left", padx=(0, 5))
-        self._reason_label = ttk.Label(reason_row, text="--", font=("Consolas", 10))
+        # Iterations and stop reason
+        info_row = ttk.Frame(results_frame)
+        info_row.pack(fill="x", pady=(0, 5))
+        ttk.Label(info_row, text="Iterations:").pack(side="left", padx=(0, 5))
+        self._iterations_label = ttk.Label(info_row, text="--", font=("Consolas", 10))
+        self._iterations_label.pack(side="left", padx=(0, 15))
+        ttk.Label(info_row, text="Stop reason:").pack(side="left", padx=(0, 5))
+        self._reason_label = ttk.Label(info_row, text="--", font=("Consolas", 10))
         self._reason_label.pack(side="left")
 
-        # Actual advancement
+        # Advancement row
         adv_row = ttk.Frame(results_frame)
         adv_row.pack(fill="x")
-        ttk.Label(adv_row, text="Actual advancement:").pack(side="left", padx=(0, 5))
-        self._advancement_label = ttk.Label(adv_row, text="-- µm", font=("Consolas", 10, "bold"), foreground="green")
-        self._advancement_label.pack(side="left")
+        ttk.Label(adv_row, text="Last:").pack(side="left", padx=(0, 5))
+        self._advancement_label = ttk.Label(adv_row, text="-- µm", font=("Consolas", 10), foreground="blue")
+        self._advancement_label.pack(side="left", padx=(0, 20))
+        
+        ttk.Label(adv_row, text="Total:").pack(side="left", padx=(0, 5))
+        self._total_label = ttk.Label(adv_row, text="0.0 µm", font=("Consolas", 10, "bold"), foreground="green")
+        self._total_label.pack(side="left", padx=(0, 10))
+        
+        self._reset_total_btn = ttk.Button(adv_row, text="Reset Total", command=self._reset_total)
+        self._reset_total_btn.pack(side="left")
 
     def _set_target(self, um: int) -> None:
         """Set target value."""
         self._target_entry.delete(0, "end")
         self._target_entry.insert(0, str(um))
 
+    @property
+    def manipulator_id(self) -> str:
+        """Get manipulator ID."""
+        return self._manip_entry.get().strip()
+
+    def _reset_params(self) -> None:
+        """Reset parameters to defaults."""
+        self._max_iter_entry.delete(0, "end")
+        self._max_iter_entry.insert(0, "50")
+        self._p1_steps_entry.delete(0, "end")
+        self._p1_steps_entry.insert(0, "2")
+        self._p1_pulses_entry.delete(0, "end")
+        self._p1_pulses_entry.insert(0, "70")
+        self._p2_steps_entry.delete(0, "end")
+        self._p2_steps_entry.insert(0, "2")
+        self._p2_pulses_entry.delete(0, "end")
+        self._p2_pulses_entry.insert(0, "-70")
+
+    def _reset_total(self) -> None:
+        """Reset total advancement for current manipulator."""
+        manip_id = self.manipulator_id
+        if not manip_id:
+            messagebox.showerror("Error", "Manipulator ID is required.")
+            return
+        
+        self._totals[manip_id] = 0.0
+        self._total_label.configure(text="0.0 µm")
+        self._advancement_label.configure(text="-- µm")
+        self._on_log(f"Total advancement reset for manipulator {manip_id}.")
+
     def set_enabled(self, enabled: bool) -> None:
-        """Enable or disable run button."""
+        """Enable or disable buttons."""
         self._run_btn.configure(state="normal" if enabled and not self._running else "disabled")
+        self._get_pos_btn.configure(state="normal" if enabled else "disabled")
+
+    def _get_position(self) -> None:
+        """Get and display current position."""
+        manip_id = self.manipulator_id
+        if not manip_id:
+            messagebox.showerror("Error", "Manipulator ID is required.")
+            return
+
+        try:
+            position = self._client.get_position(manip_id)
+            pos_text = f"x: {position.x:.4f}   y: {position.y:.4f}   z: {position.z:.4f}   w: {position.w:.4f}"
+            self._position_label.configure(text=pos_text)
+            self._on_log(f"Position: {position}")
+            
+            # Show current total for this manipulator
+            total = self._totals.get(manip_id, 0.0)
+            self._total_label.configure(text=f"{total:.1f} µm")
+        except Exception as e:
+            self._on_log(f"Get position failed: {e}")
+            messagebox.showerror("Error", str(e))
+
+    def _emergency_stop_combined(self) -> None:
+        """Stop movement and abort closed loop."""
+        try:
+            self._client.abort_jackhammer()
+        except Exception:
+            pass
+        self._on_emergency_stop()
 
     def _run(self) -> None:
         """Execute closed loop jackhammer."""
-        manip_id = self._manip_entry.get().strip()
+        manip_id = self.manipulator_id
         if not manip_id:
             messagebox.showerror("Error", "Manipulator ID is required.")
             return
 
         try:
             target_um = float(self._target_entry.get().strip())
+            max_iterations = int(self._max_iter_entry.get().strip())
+            p1_steps = int(self._p1_steps_entry.get().strip())
+            p1_pulses = int(self._p1_pulses_entry.get().strip())
+            p2_steps = int(self._p2_steps_entry.get().strip())
+            p2_pulses = int(self._p2_pulses_entry.get().strip())
         except ValueError:
-            messagebox.showerror("Error", "Target must be a number.")
+            messagebox.showerror("Error", "All parameters must be valid numbers.")
             return
 
         if target_um <= 0:
             messagebox.showerror("Error", "Target must be positive.")
+            return
+
+        if max_iterations <= 0:
+            messagebox.showerror("Error", "Max iterations must be positive.")
             return
 
         if not self._is_connected():
@@ -647,7 +784,7 @@ Stop conditions:
 
         self._running = True
         self._run_btn.configure(state="disabled")
-        self._on_log(f"Starting closed loop: target={target_um} µm on manipulator {manip_id}...")
+        self._on_log(f"Starting closed loop: target={target_um} µm, max_iter={max_iterations} on manipulator {manip_id}...")
 
         # Clear previous results
         self._position_label.configure(text="Running...")
@@ -655,19 +792,33 @@ Stop conditions:
         self._reason_label.configure(text="...")
         self._advancement_label.configure(text="... µm")
 
-        thread = threading.Thread(target=self._execute, args=(manip_id, target_um))
+        thread = threading.Thread(
+            target=self._execute,
+            args=(manip_id, target_um, max_iterations, p1_steps, p1_pulses, p2_steps, p2_pulses)
+        )
         thread.start()
 
-    def _execute(self, manip_id: str, target_um: float) -> None:
+    def _execute(
+        self,
+        manip_id: str,
+        target_um: float,
+        max_iterations: int,
+        p1_steps: int,
+        p1_pulses: int,
+        p2_steps: int,
+        p2_pulses: int,
+    ) -> None:
         """Execute in background thread."""
         try:
-            result = self._client.jackhammer_closed_loop(manip_id, target_um)
+            result = self._client.jackhammer_closed_loop(
+                manip_id, target_um, max_iterations, p1_steps, p1_pulses, p2_steps, p2_pulses
+            )
             # Schedule UI update on main thread
-            self._run_btn.master.after(0, self._handle_result, result)
+            self._run_btn.master.after(0, self._handle_result, result, manip_id)
         except Exception as e:
             self._run_btn.master.after(0, self._handle_error, str(e))
 
-    def _handle_result(self, result: dict) -> None:
+    def _handle_result(self, result: dict, manip_id: str) -> None:
         """Handle result in main thread."""
         self._running = False
         self._run_btn.configure(state="normal")
@@ -692,15 +843,23 @@ Stop conditions:
         reason_display = {
             "target_reached": "✅ Target reached",
             "backward_movement": "⚠️ Backward movement",
-            "max_iterations": "🔴 Max iterations (50)",
+            "max_iterations": "🔴 Max iterations",
+            "aborted": "🛑 Aborted",
         }.get(reason, reason)
         self._reason_label.configure(text=reason_display)
 
         # Update advancement
         advancement = result.get("AdvancementUm", 0)
         self._advancement_label.configure(text=f"{advancement:.1f} µm")
+        
+        # Update total for this manipulator
+        if manip_id not in self._totals:
+            self._totals[manip_id] = 0.0
+        self._totals[manip_id] += advancement
+        self._total_label.configure(text=f"{self._totals[manip_id]:.1f} µm")
 
         self._on_log(f"Closed loop complete: {advancement:.1f} µm in {iterations} iterations ({reason})")
+        self._on_log(f"  Total advancement: {self._totals[manip_id]:.1f} µm")
 
     def _handle_error(self, error: str) -> None:
         """Handle error in main thread."""
@@ -896,6 +1055,8 @@ class JackhammerGUI:
             self._client,
             self._status.log,
             lambda: self._client.is_connected,
+            self._emergency_stop,
+            self._show_help,
         )
 
         # Calculator tab
@@ -1055,7 +1216,12 @@ class JackhammerGUI:
         """Emergency stop."""
         self._status.log("!!! EMERGENCY STOP !!!")
 
+        # Try to get manipulator ID from either tab
         manip_id = self._manipulator.manipulator_id
+        if not manip_id:
+            # Try closed loop tab
+            manip_id = self._closed_loop.manipulator_id
+        
         if not manip_id:
             self._status.log("No manipulator ID specified.")
             return
