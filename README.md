@@ -1,7 +1,7 @@
 # Jackhammer Tool - params-logging
 
 A version of standalone GUI application for running jackhammer mode on Sensapex manipulators via Ephys Link. Designed for neuroscientists who need to break through the dura mater without using the full Pinpoint application.
-Ths specific version enables researchers to record parameters used to tun jackhammer in a .csv file for research or convenience purposes.
+This specific version enables researchers to record parameters used to tun jackhammer in a .csv file for research or convenience purposes.
 
 ## What is Jackhammer Mode?
 
