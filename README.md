@@ -5,7 +5,6 @@ A standalone GUI application for running jackhammer mode on Sensapex manipulator
 ## What is Jackhammer Mode?
 
 Jackhammer mode creates rapid vibration in the manipulator to help the probe penetrate the dura mater (the tough membrane covering the brain). The manipulator oscillates back and forth on the depth axis, helping the probe break through resistant tissue without excessive force.
-zzzz
 
 ## Requirements
 
@@ -20,6 +19,7 @@ zzzz
 ```bash
 git clone https://github.com/VirtualBrainLab/jackhammer-tool.git
 cd jackhammer-tool
+git checkout params-logging
 python -m venv venv
 venv\Scripts\activate  # Windows
 pip install -r requirements.txt
@@ -36,13 +36,9 @@ Download `JackhammerTool.exe` from Releases and run directly.
    ```bash
    ephys-link -b -t ump
    ```
-
 2. **Launch Jackhammer Tool**
-
 3. **Connect** to the server (default: localhost:3000)
-
 4. **Enter manipulator ID** (shown in Ephys Link on startup)
-
 5. **Run Jackhammer** with desired parameters
 
 ## Features
@@ -53,6 +49,42 @@ Download `JackhammerTool.exe` from Releases and run directly.
 - **Total advancement:** Tracks cumulative advancement per manipulator
 - **Calculator tab:** Explore the empirical advancement formula
 - **Emergency stop:** Ctrl+Alt+Shift+Q
+- **Run logging (this branch):** Every jackhammer run is appended to a CSV file for later analysis
+
+## Run Logging
+
+Every open- and closed-loop run is logged as one row in:
+
+```
+%USERPROFILE%\JackhammerTool\runs.csv   (Windows)
+~/JackhammerTool/runs.csv               (Mac/Linux)
+```
+
+The file is created automatically on first launch and appended to thereafter — nothing is ever overwritten or deleted by the app. Move or delete the file manually when you want to archive or reset.
+
+### Logged columns
+
+| Column | Description |
+|---|---|
+| `timestamp_iso` | When the run completed (ISO 8601, local TZ) |
+| `date` | YYYY-MM-DD, for joining with paper experiment forms |
+| `mode` | `open` or `closed` |
+| `manipulator_id` | Manipulator that ran |
+| `preset` | `Gentle`, `Standard`, `Custom`, or blank (closed loop) |
+| `iterations_param` | Iterations parameter (open loop only) |
+| `phase1_steps`, `phase1_pulses` | Forward-phase parameters |
+| `phase2_steps`, `phase2_pulses` | Backward-phase parameters |
+| `target_um` | Target advancement, µm (closed loop only) |
+| `max_iterations` | Safety cap (closed loop only) |
+| `iterations_used` | Iterations actually run (closed loop only) |
+| `stop_reason` | `target_reached`, `backward_movement`, `max_iterations`, `aborted` |
+| `advancement_um` | Actual advancement, µm |
+| `aborted` | `true` if user hit emergency stop |
+| `app_version` | Schema version of the writing app |
+
+### Joining with paper forms
+
+Each row carries `date` and `manipulator_id`, which match the experiment form fields (mouse name, experimenter, jackhammer used, bleeding, bending, probe ID). Join on `(date, manipulator_id)` to recover full session context for each run.
 
 ## Parameter Guide
 
@@ -81,7 +113,6 @@ Where I = iterations, S₁ = phase 1 steps, P₁ = phase 1 pulses.
 ⚠️ **Check position** after each jackhammer call
 
 ⚠️ **Emergency stop:** Ctrl+Alt+Shift+Q
-
 
 ## Related Projects
 
