@@ -4,6 +4,7 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Callable, Optional
+from .run_logger import RunLogger
 
 from .client import EphysLinkClient
 from .constants import (
@@ -185,6 +186,7 @@ class ParametersFrame:
     def __init__(self, parent: ttk.Frame, on_log: Callable[[str], None]) -> None:
         """Initialize parameters frame."""
         self._on_log = on_log
+        self._preset_modified = False  # True if user edited entries after applying a preset
         
         frame = ttk.LabelFrame(parent, text="Jackhammer Parameters", padding="5")
         frame.pack(fill="x", pady=(0, 10))
@@ -240,12 +242,14 @@ class ParametersFrame:
         self.phase2_steps_entry = ttk.Entry(params_frame, width=10)
         self.phase2_steps_entry.insert(0, str(DEFAULT_PHASE2_STEPS))
         self.phase2_steps_entry.grid(row=2, column=1, sticky="w")
+        self.phase2_steps_entry.bind("<KeyRelease>", self._on_param_edit)
         ToolTip(self.phase2_steps_entry, TOOLTIPS["phase2_steps"])
 
         ttk.Label(params_frame, text="Phase 2 Pulses:").grid(row=2, column=2, sticky="e", padx=(10, 5))
         self.phase2_pulses_entry = ttk.Entry(params_frame, width=10)
         self.phase2_pulses_entry.insert(0, str(DEFAULT_PHASE2_PULSES))
         self.phase2_pulses_entry.grid(row=2, column=3, sticky="w")
+        self.phase2_pulses_entry.bind("<KeyRelease>", self._on_param_edit)
         ToolTip(self.phase2_pulses_entry, TOOLTIPS["phase2_pulses"])
 
         # Live prediction display
@@ -265,6 +269,11 @@ class ParametersFrame:
 
     def _update_prediction(self, event=None) -> None:
         """Update the live prediction display."""
+        # If this was triggered by a real user keystroke, mark preset as modified.
+        # event is None when called programmatically (e.g. from _apply_preset).
+        if event is not None:
+            self._preset_modified = True
+
         try:
             iterations = int(self.iterations_entry.get().strip() or "0")
             phase1_steps = int(self.phase1_steps_entry.get().strip() or "0")
@@ -285,6 +294,11 @@ class ParametersFrame:
             self._prediction_label.configure(text="-- µm")
             self._warning_label.configure(text="")
 
+    def _on_param_edit(self, event=None) -> None:
+        """Mark preset as modified when user edits parameters."""
+        self._preset_modified = True
+        
+
     def _apply_preset(self, event=None) -> None:
         """Apply selected preset values."""
         preset_name = self._preset_var.get()
@@ -296,6 +310,7 @@ class ParametersFrame:
         self._set_entry(self.phase2_steps_entry, preset["phase2_steps"])
         self._set_entry(self.phase2_pulses_entry, preset["phase2_pulses"])
         self._preset_desc.configure(text=preset["description"])
+        self._preset_modified = False  # values now match the preset cleanly
         
         self._update_prediction()
         self._on_log(f"Applied preset: {preset_name}")
@@ -324,6 +339,13 @@ class ParametersFrame:
         except ValueError:
             messagebox.showerror("Error", "All parameters must be integers.")
             return None
+        
+    @property
+    def active_preset(self) -> str:
+        """Return the active preset name, or 'Custom' if values were edited."""
+        if self._preset_modified:
+            return "Custom"
+        return self._preset_var.get()
 
 
 class ControlFrame:
@@ -523,6 +545,7 @@ class ClosedLoopTab:
         is_connected: Callable[[], bool],
         on_emergency_stop: Callable[[], None],
         on_help: Callable[[], None],
+        run_logger: RunLogger,
     ) -> None:
         """Initialize closed loop tab."""
         self._client = client
@@ -530,6 +553,7 @@ class ClosedLoopTab:
         self._is_connected = is_connected
         self._on_emergency_stop = on_emergency_stop
         self._on_help = on_help
+        self._run_logger = run_logger
         self._running = False
         self._totals: dict[str, float] = {}  # Track total advancement per manipulator
 
@@ -861,6 +885,23 @@ Stop conditions:
         self._on_log(f"Closed loop complete: {advancement:.1f} µm in {iterations} iterations ({reason})")
         self._on_log(f"  Total advancement: {self._totals[manip_id]:.1f} µm")
 
+        # Log to CSV
+        try:
+            self._run_logger.log_closed_loop(
+                manipulator_id=manip_id,
+                target_um=float(self._target_entry.get().strip()),
+                max_iterations=int(self._max_iter_entry.get().strip()),
+                phase1_steps=int(self._p1_steps_entry.get().strip()),
+                phase1_pulses=int(self._p1_pulses_entry.get().strip()),
+                phase2_steps=int(self._p2_steps_entry.get().strip()),
+                phase2_pulses=int(self._p2_pulses_entry.get().strip()),
+                iterations_used=int(iterations) if str(iterations).isdigit() else 0,
+                stop_reason=reason,
+                advancement_um=float(advancement),
+            )
+        except Exception as log_err:
+            self._on_log(f"(log write failed: {log_err})")
+
     def _handle_error(self, error: str) -> None:
         """Handle error in main thread."""
         self._running = False
@@ -1020,6 +1061,7 @@ class JackhammerGUI:
         self.root.resizable(False, False)
 
         self._client = EphysLinkClient()
+        self._run_logger = RunLogger()
         
         # Track advancement per manipulator
         self._totals: dict[str, float] = {}  # {manipulator_id: total_um}
@@ -1057,6 +1099,7 @@ class JackhammerGUI:
             lambda: self._client.is_connected,
             self._emergency_stop,
             self._show_help,
+            self._run_logger,
         )
 
         # Calculator tab
@@ -1162,13 +1205,45 @@ class JackhammerGUI:
                     actual_um = (result.position.w - self._position_before.w) * 1000
                     self._position.update_actual_advancement(actual_um)
                     self._status.log(f"  Actual advancement: {actual_um:+.1f} µm")
-                    
+                    # Log to CSV
+                    try:
+                        params = self._parameters.get_params(manip_id)
+                        if params:
+                            self._run_logger.log_open_loop(
+                                manipulator_id=manip_id,
+                                iterations=params.iterations,
+                                phase1_steps=params.phase1_steps,
+                                phase1_pulses=params.phase1_pulses,
+                                phase2_steps=params.phase2_steps,
+                                phase2_pulses=params.phase2_pulses,
+                                advancement_um=actual_um,
+                            )
+                    except Exception as log_err:
+                        self._status.log(f"(log write failed: {log_err})")
+                                
                     # Update total for this manipulator
                     if manip_id not in self._totals:
                         self._totals[manip_id] = 0.0
                     self._totals[manip_id] += actual_um
                     self._position.update_total_advancement(self._totals[manip_id])
                     self._status.log(f"  Total advancement: {self._totals[manip_id]:.1f} µm")
+
+                    # Log to CSV
+                    try:
+                        params = self._parameters.get_params(manip_id)
+                        if params:
+                            self._run_logger.log_open_loop(
+                                manipulator_id=manip_id,
+                                iterations=params.iterations,
+                                phase1_steps=params.phase1_steps,
+                                phase1_pulses=params.phase1_pulses,
+                                phase2_steps=params.phase2_steps,
+                                phase2_pulses=params.phase2_pulses,
+                                advancement_um=actual_um,
+                                preset=self._parameters.active_preset,
+                            )
+                    except Exception as log_err:
+                        self._status.log(f"(log write failed: {log_err})")
                 
                 self._position_before = None
         else:
