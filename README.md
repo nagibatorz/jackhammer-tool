@@ -5,7 +5,6 @@ A standalone GUI application for running jackhammer mode on Sensapex manipulator
 ## What is Jackhammer Mode?
 
 Jackhammer mode creates rapid vibration in the manipulator to help the probe penetrate the dura mater (the tough membrane covering the brain). The manipulator oscillates back and forth on the depth axis, helping the probe break through resistant tissue without excessive force.
-Version from logging-params also enables to collect and log data for research purposes
 
 ## Requirements
 
